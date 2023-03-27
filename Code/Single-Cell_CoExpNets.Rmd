@@ -1,0 +1,350 @@
+---
+title: "Single-Cell CoExpNets"
+output: html_document
+date: "2023-02-21"
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Load Packages
+library(readr)
+library(tibble)
+library(tidyverse)
+library(Matrix)
+library(cowplot)
+library(ggplot2)
+library(scales)
+library(Seurat)
+library(limma)
+library(patchwork)
+library(AnnotationHub)
+library(gprofiler2)
+library(WGCNA)
+library(CoExpNets)
+library(DescTools)
+source("CoExp_Fun.R")
+```
+
+This document displays all the code for the single-cell results in the paper.
+
+First we load the data
+
+```{r}
+##Load Data and metadata
+datExpr0 <- as.matrix(readRDS("../RawData/rawcounts.rds"))
+gc()
+datTraits <- read_delim("../RawData/metadata.tsv", "\t", 
+    escape_double = FALSE, trim_ws = TRUE)
+datTraits <- column_to_rownames(datTraits, var = "Barcode")
+
+##Recode Metadata for later plots
+  datTraits$genotype <- as.numeric(gsub("K", 1, gsub("W", 0, datTraits$genotype))) #replace WT with 0 and Trem2 R47H with 1
+  datTraits$gender <- as.numeric(gsub("F", 1, gsub("M", 0, datTraits$gender))) #replace Control with 0 and IL4 with 1
+  datTraits$age <- as.numeric(datTraits$age)
+  datTraits$KIage <- rep(NA)
+  datTraits[datTraits$genotype == 1,]$KIage <- datTraits[datTraits$genotype == 1,]$age
+  datTraits$WTage <- rep(NA)
+  datTraits[datTraits$genotype == 0,]$WTage <- datTraits[datTraits$genotype == 0,]$age
+  datTraits$res.0.4 <- as.factor(datTraits$res.0.4)
+  datTraits$HRM1 <- as.numeric(gsub("0", 6, datTraits$res.0.4))
+  datTraits$HRM1 <- as.numeric(gsub("1|2|3|4|5", 0, datTraits$HRM1))
+  datTraits$HRM2 <- as.numeric(gsub("1", 1, gsub(c("0|2|3|4|5"), 0, datTraits$res.0.4)))
+  datTraits$ARM <- as.numeric(gsub("2", 1, gsub(c("1|0|3|4|5"), 0, datTraits$res.0.4)))
+  datTraits$TRM <- as.numeric(gsub("3", 1, gsub(c("1|2|0|4|5"), 0, datTraits$res.0.4)))
+  datTraits$IRM <- as.numeric(gsub("4", 1, gsub(c("1|2|3|0|5"), 0, datTraits$res.0.4)))
+  datTraits$CPM <- as.numeric(gsub("5", 1, gsub(c("1|2|3|4|0"), 0, datTraits$res.0.4)))
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+datTraits$sample <- datTraits$set
+datExpr0 = datExpr0[,colnames(datExpr0) %in% rownames(datTraits[datTraits$tissue == "H",])]
+datExpr0 = datExpr0[,colnames(datExpr0) %in% rownames(datTraits[datTraits$genotype == 0,])]
+
+#Normalise
+datExpr0 = as.data.frame(as.matrix(Seurat::LogNormalize(datExpr0)))
+save(datExpr0, file = "../ProcessedData/scNormCounts.rds")
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+datTraits$sample = datTraits$set
+```
+
+Now some QC and pre-processing
+
+```{r}
+#QC Plots
+
+# Extract IDs for mitochondrial genes
+ah <- AnnotationHub() 
+ahDb <- query(ah, 
+              pattern = c("Mus musculus", "EnsDb"), 
+              ignore.case = TRUE)
+
+id <- ahDb %>%
+  mcols() %>%
+  rownames() %>%
+  tail(n = 1)
+
+edb <- ah[[id]]
+
+# Extract gene-level information from database
+annotations <- genes(edb, 
+                     return.type = "data.frame")
+
+# Select annotations of interest
+annotations <- annotations %>%
+  dplyr::select(gene_id, gene_name, gene_biotype, seq_name, description, entrezid)
+
+# Extract IDs for mitochondrial genes
+mt <- annotations %>% 
+  dplyr::filter(seq_name == "MT") %>%
+  dplyr::pull(gene_name)
+  
+#Calculate nGenes/reads
+datTraits$nCount_RNA <- colSums(datExpr0, na.rm = T)
+
+datTraits$nFeature_RNA <- colSums(datExpr0 > 0)
+
+# Number of UMIs assigned to mitochondrial genes
+datTraits$mtUMI <- colSums(datExpr0[which(rownames(datExpr0) %in% mt),], na.rm = T)
+
+# Ensure all NAs receive zero counts
+datTraits$mtUMI[is.na(datTraits$mtUMI)] <- 0
+# Calculate of mitoRatio per cell
+datTraits$mitoRatio <- datTraits$mtUMI/datTraits$nCount_RNA
+
+# Keep cells with nUMI greater than 100
+datTraits$nCount_RNA = as.numeric(datTraits$nCount_RNA)
+datTraits$nFeature_RNA = as.numeric(datTraits$nFeature_RNA)
+idx <- which(datTraits$nCount_RNA > 100)
+
+# Extract the counts for those cells
+datExpr0 <- datExpr0[, idx]
+
+# Extract the metadata for those cells
+datTraits <- datTraits[idx,]
+
+
+# Create a data frame containing the metrics for visualizations
+metrics <- datTraits
+
+#Number of cells/Sample
+metrics %>% 
+  ggplot(aes(x=sample, fill=sample)) + 
+  geom_bar() + 
+  ggtitle("NCells")
+
+# Visualize the number UMIs/transcripts per cell
+metrics %>% 
+  ggplot(aes(color=sample, x=nCount_RNA, fill= sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  ylab("log10 cell density") +
+  geom_vline(xintercept = 3000)
+
+# Visualize the distribution of genes detected per cell via histogram
+metrics %>% 
+  ggplot(aes(color=sample, x=nFeature_RNA, fill= sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 800)
+
+# Visualize the distribution of genes detected per cell via boxplot
+metrics %>% 
+  ggplot(aes(x=sample, y=log10(nFeature_RNA), fill=sample)) + 
+  geom_boxplot() + 
+  ggtitle("NCells vs NGenes")
+
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+metrics %>% 
+  ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) + 
+  geom_point() + 
+  stat_smooth(method=lm) +
+  scale_x_log10() + 
+  scale_y_log10() + 
+  geom_vline(xintercept = 2200) +
+  geom_hline(yintercept = 1800) +
+  facet_wrap(~sample)
+
+# Visualize the distribution of mitochondrial gene expression detected per cell
+metrics %>% 
+  ggplot(aes(color=sample, x=mitoRatio, fill=sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 0.03)
+
+metrics$log10GenesPerUMI <- log10(metrics$nCount_RNA/metrics$nFeature_RNA)
+# Visualize the overall novelty of the gene expression by visualizing the genes detected per UMI
+metrics %>%
+  ggplot(aes(x=log10GenesPerUMI, color = sample, fill=sample)) +
+  geom_density() + geom_vline(xintercept = 0)
+metrics$cells <- rownames(metrics)
+```
+
+```{r}
+# Subset the cells to only include those that meet the thresholds specified
+keep <- metrics %>%
+  dplyr::filter(nFeature_RNA > 1000 , 
+                nCount_RNA > 1500,
+                mitoRatio < 0.05
+  ) %>% 
+  pull(cells)
+
+# Subset the cells to only include those that meet the thresholds specified
+datExpr0 <- datExpr0[ ,keep]
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+
+#Process for CoExpNets, without variation filter to get get expressed genes for future enrichment analyses
+datExpr = CoExpPrepareSC(datExpr0, datTraits, 0, 0.025, clusters = "res.0.4")
+Genes = colnames(datExpr)
+write.csv(Genes, file = "../ProcessedData/AGE SC GENES R 0.025.csv")
+
+#Now with variation filter for CoExpNets
+datExpr = CoExpPrepareSC(datExpr0, datTraits, 0.01, 0.025, clusters = "res.0.4")
+
+save(datExpr, datTraits, file = "../ProcessedData/ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.Data.Input.rds")
+```
+
+Now we run coexpnets
+
+```{r}
+load("../ProcessedData/ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.Data.Input.rds")
+gc()
+
+#Make sure you have a file called results in your currend working directory!!!
+net = CoExpNets::getDownstreamNetwork(tissue="ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500",
+                                      n.iterations=40,
+                                      net.type = "signed",
+                                      debug=F, fullAnnotation=FALSE,
+                                      expr.data=datExpr,
+                                      job.path="../results/")
+```
+
+Now we can visualise the results
+```{r}
+load("../ProcessedData/ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.Data.Input.rds")
+net.name ="netScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.10.it.20.rds"  
+tissue = paste("../results/", net.name, sep = "")
+
+femaleSamples = rownames(datExpr);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+covs <- as.data.frame(datTraits[,!colnames(datTraits) %in% c("orig.ident", "percent.mito", "tissue","plateplus", "lane", "set", "reads", "genes", "pcmito", "pcercc", "log2reads", "log2genes", "z_neutrop", "clugeno","nCount_RNA", "nFeature_RNA", "sample", "howmanycells", "quality", "mitoRatio", "mtUMI", "age", "res.0.4")])
+covs1 <- as.data.frame(apply(covs, 2, as.factor))
+covs <- as.data.frame(apply(covs, 2, as.numeric))
+
+cat = corWithCatTraitsSC(which.one="new", tissue=tissue, covs = as.data.frame(covs1), covlist = c("gender", "plate", "HRM1", "HRM2", "ARM", "IRM", "CPM", "TRM", "WTage"), retPVals=T)
+cat = -log10(cat)
+CoExpNets::corWithNumTraits(which.one="new", tissue=tissue, covs = as.data.frame(covs), covlist = colnames(covs))
+#dev.off()
+Allmms = CoExpNets::getMM(which.one="new",tissue=tissue,
+              genes= colnames(datExpr),expr.data.file = datExpr) #Get MM of genes
+write.csv(cat, file = "../results/CatHeatmap.csv")
+```
+
+Now extract the co-expression metrics for modules of interes
+```{r}
+dir.create("../results/scModuleStats/")
+#remember to change beta for different networks
+
+Beta = 10
+
+MOI = c("orange", "purple", "darkred", "lightyellow", "brown", "royalblue", "blue")
+
+Modules = lapply(MOI, function(Network){
+  Module <- mms_TOM(datExpr, Network, tissue, Beta)
+  write.csv(Module[[1]], file = paste0("../results/scModuleStats/",Network,"Module Membership", net.name, ".csv"))
+  write.table(Module[[2]], file= paste0("../results/scModuleStats/TOMs",Network,net.name,".txt"),sep = , quote=FALSE, row.names=FALSE, col.names = FALSE)
+  return(Module)
+} 
+)
+
+names(Modules) = MOI
+```
+
+Now do some enrichment analysis
+
+```{r}
+#Load the background genes
+Allgenes <- read_csv("../ProcessedData/AGE SC GENES R 0.025.csv")
+Allgenes = Allgenes$x
+dir.create("../results/SingleCellGos/")
+
+Enrichments = lapply(names(Modules), function(Module){
+  Gprofiler <- gost(Modules[[Module]][[1]]$ensgene, organism = "mmusculus", ordered_query = TRUE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = TRUE,
+                    measure_underrepresentation = FALSE, evcodes = FALSE,
+                    user_threshold = 0.05, correction_method = c("bonferroni"),
+                    custom_bg = Allgenes,
+                    numeric_ns = "", sources = NULL)
+  print(gostplot(Gprofiler, capped = FALSE, interactive = TRUE, pal = c(`GO:MF`
+                                                                  = "#dc3912", `GO:BP` = "#ff9900", `GO:CC` = "#109618", KEGG = "#dd4477",
+                                                                  REAC = "#3366cc", WP = "#0099c6", TF = "#5574a6", MIRNA = "#22aa99", HPA
+                                                                  = "#6633cc", CORUM = "#66aa00", HP = "#990099")))
+  GoResult = Gprofiler$result
+  GoResult = GoResult[!GoResult$source=="TF",]
+  GoResult = GoResult[order(GoResult$p_value),]
+  GoResult$term_name = paste(GoResult$term_name, GoResult$term_id, sep = " ")
+  GoResult = GoResult[colnames(GoResult) %in% c("term_name", "p_value")]
+  GoResult = GoResult[!duplicated(GoResult$term_name),]
+  rownames(GoResult) = GoResult$term_name
+  GoResult$term_name = NULL
+  write.csv(GoResult, file = paste0("../results/SingleCellGos/SingleCell_", Module, "_GoResult.csv"))
+  return(GoResult)
+}
+)
+```
+
+Assess Module Expression in O'Neil 2018 data from microglia isolated from the hippocampi of young and old mice.
+
+```{r}
+load("../ProcessedData/OneilProcessed.rds")
+dir.create("../results/scModuleExpinOneil/")
+datTraits$age = factor(datTraits$age, levels = c("ADULT", "AGED"))
+
+for(Module in names(Modules)){    
+  SUM = Assess_exp(datExpr, traits = datTraits, Genes = Modules[[Module]][[1]][1:100,]$ensgene, title = Module, var = "age")
+  SUM = as.data.frame(SUM)[,c(2,1)]
+  colnames(SUM) = c("Young", "Old")
+  write.csv(SUM, paste0("../results/scModuleExpinOneil/", Module, "Exp.csv"))
+}
+```
+
+Assess Module Expression in Nugent 2020 data from microglia isolated from the corpus callosum of mice fed a cuprizone diet for 0, 5, or 12 weeks.
+
+```{r}
+load("../ProcessedData/NugentDemyelinationPreProcessed.rds")
+dir.create("../results/scModuleExpinNugent/")
+
+datTraits$timepoint = factor(datTraits$timepoint, levels = c("0", "5", "12"))
+
+for(Module in names(Modules)){
+  SUM = Assess_exp(datExpr, traits = datTraits, Genes = Modules[[Module]][[1]][1:100,]$ensgene, title = Module, var = "timepoint")
+  SUM = lapply(SUM, function(x) {
+    length(x) = 5
+    return(x)} )
+  SUM = as.data.frame(do.call(cbind, SUM))
+  SUM = SUM[,c(2,3,1)]
+  colnames(SUM) = c("control", "5", "12")
+  write.csv(SUM, paste0("../results/scModuleExpinNugent/", Module, "exp.csv"))
+}
+```
+
+Now check preservation in the Nugent SC samples
+
+```{r}
+load("../ProcessedData/NugentSC.PreservationInput.rds")
+datExpr1 = datExpr
+load("../ProcessedData/ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.Data.Input.rds")
+
+gc()
+Pres = preservationOneWayNew(network = tissue,expr.data.files = list(datExpr, datExpr1), tissues = c("Carlo", "NugentSC"), permutations=50, maxGoldModuleSize = 400)
+write.csv(Pres[[1]], file = "../results/CarlovsNugentSCZvalues.csv")
+write.csv(Pres[[2]], file = "../results/CarlovsNugentSCPvalues.csv")
+```
+
+Here's all the package and session info
+
+```{r}
+sessionInfo()
+```
+

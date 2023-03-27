@@ -1,0 +1,52 @@
+---
+title: "OneilPreProcess"
+output: html_document
+date: "2023-02-23"
+---
+
+```{r setup}
+#Load Packages
+library(CoExpNets)
+library(dplyr)
+library(tibble)
+library(limma)
+```
+
+```{r}
+#Load DESEQ2 Normalised Counts + Metadata
+datTraits = read.csv("../RawData/sample_key.csv")
+datExpr0 = read.csv("../RawData/microglia_norm_counts.csv")
+
+#Make sure they match up
+datTraits <- column_to_rownames(datTraits, var = "microglia")
+datTraits <- datTraits[,-c(1, 5)];
+datTraits$batchno <- as.numeric(gsub("ONE", 0 ,gsub("TWO", 1, gsub("THREE", 3, datTraits$batchno))))   
+datExpr0 <- column_to_rownames(datExpr0, var = "X") 
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+
+#Only keep controls
+datExpr0 = datExpr0[,colnames(datExpr0) %in% rownames(datTraits[datTraits$tx == "CON",])]
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+datExpr0 = as.matrix(datExpr0)
+
+#exclude lowly expressed genes
+getexp <- apply(datExpr0, 1, mean)
+param <- 1.5
+datExpr0 <- datExpr0[getexp > param & !is.na(getexp), ] 
+datExpr0 = log2(datExpr0 + 1)
+
+library(limma)
+datExpr0 = limma::removeBatchEffect(datExpr0, batch = datTraits$batchno, design = model.matrix(~age, datTraits))
+
+datTraits$ConAge <- datTraits$age
+
+#Transpose and save
+datExpr <- as.data.frame(t(datExpr0))
+
+save(datExpr, datTraits, file = "../ProcessedData/OneilProcessed.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

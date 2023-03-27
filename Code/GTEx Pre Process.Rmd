@@ -1,0 +1,366 @@
+---
+title: "GTEX Pre Process"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(tibble)
+library(tidyverse)
+library(Matrix)
+library(cowplot)
+library(ggplot2)
+library(scales)
+library(Seurat)
+library(limma)
+library(stringr)
+library(patchwork)
+library(AnnotationHub)
+library(gprofiler2)
+library(limma)
+library(swamp)
+library(outliers)
+library(flashClust)
+library(WGCNA)
+library(CoExpNets)
+library(tidyr)
+library(readxl)
+library(tibble)
+library("ggpubr")
+source("CoExp_Fun.R")
+```
+
+## R Mar
+
+```{r}
+datExpr0 =  read.delim(file="../RawData/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct.gz", skip=2)
+Genes = datExpr0$Description
+datExpr0 = datExpr0[,-c(1, 2)]
+
+samples = read.delim(file="../RawData/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt")
+subjects = read.delim(file="../RawData/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")
+samples$SAMPID = gsub("-", ".", samples$SAMPID)
+samples = column_to_rownames(samples, var = "SAMPID")
+samples = samples[match(colnames(datExpr0), rownames(samples)),]
+
+#Only Hippo Samples
+datExpr0 = datExpr0[,samples$SMTSD == "Brain - Hippocampus"]
+samples = samples[match(colnames(datExpr0), rownames(samples)),]
+
+#Add transcript counts
+datExpr0 = aggregate(datExpr0, by = list(Genes), sum)
+datExpr0 = column_to_rownames(datExpr0, var = "Group.1")
+
+#Add subject info
+subjects$SUBJID = gsub("-", ".", subjects$SUBJID)
+subjects = subjects[match(substr(rownames(samples),1,9), substr(subjects$SUBJID,1,9)),]
+datTraits = cbind(samples, subjects)
+
+#Filter
+param <- 0.5
+getExp = apply(datExpr0, 1, var)
+datExpr0 <- datExpr0[getExp > param & !is.na(getExp), ] #exclude lowly-expressed genes
+AllGenes = rownames(datExpr0)
+save(AllGenes, file = "../ProcessedData/GTEx Genes.rds")
+
+getVar = apply(datExpr0, 1, var)
+param <- 0.05
+datExpr0 <- datExpr0[getVar > param & !is.na(getVar), ] #exclude non-variant genes
+
+datExpr0 = log2(datExpr0+1)
+
+library(outliers)
+library(flashClust)
+outlist = NULL
+#Traspose data frame and get a distance matrix between pairs of samples
+sampdist = as.matrix(dist(CoExpNets::trasposeDataFrame(datExpr0,F)))
+result = grubbs.test(apply(sampdist,1,sum))
+#Is the test significant at 95% confidence level?
+if(result$p.value < 0.05){
+  cat("We should drop out",names(result$p.value),"\n")
+  plot(flashClust(dist(CoExpNets::trasposeDataFrame(datExpr0,F)), method = "average"),cex=0.5,
+       main=paste0("Detected outlier ",names(result$p.value)," in ROS/MAP cases + ctrls"))
+}else
+  cat("No plausible outlier detected\n")
+```
+
+```{r}
+dir.create("../Plots/GTEx/")
+datExpr0 <- datExpr0[,!colnames(datExpr0) == "GTEX.X4EP.0011.R1A.SM.3P624"] 
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+dnames = dimnames(datExpr0)
+
+#Select five samples randomly
+mask = sample(1:length(dnames[[2]]),5)
+#Get five different colors to distinguish the plots
+colors = rainbow(5)
+#Generate the plot with the gene expression distribution for the
+#1st sample
+plot(density(as.numeric(datExpr0[,mask[1]])),main="Before normalising",
+     xlim=c(0,200),colors[1])
+#Plot the rest of samples. Now you can see the values are not normalised
+#across samples because the distribution plots are different
+ret = lapply(mask[2:length(mask)],function(x){
+  i = which(mask == x)
+  lines(density(as.numeric(datExpr0[,x])),col=colors[i])
+  })
+
+#Normalize samples
+datExpr0 = preprocessCore::normalize.quantiles(as.matrix(datExpr0))
+dimnames(datExpr0) = dnames
+#Plot exactly the same. Now you will see plots are identical
+plot(density(as.numeric(datExpr0[,mask[1]])),main="After normalising",xlim=c(0,10),colors[1])
+ret = lapply(mask[2:length(mask)],function(x){
+  i = which(mask == x)
+  lines(density(as.numeric(datExpr0[,x])),col=colors[i])
+  })
+
+#We need limma for plotMDS
+library(limma)
+#We also need swamp for princomp
+library(swamp)
+
+#Keep only samples with available covariates
+#We will use only batch for getting the MDS plot coloured per sample
+#datTraits$SMNABTCHD = datTraits$SMGEBTCH
+covariate <- "SMNABTCHD"
+datTraits$SMNABTCHD <- as.factor(datTraits$SMNABTCHD)
+#MDS takes a while to compute so we will use only 100 samples to represent instead of the total
+mask = sample(1:ncol(datExpr0),ncol(datExpr0))
+#Get one color for each batch category
+colors = rainbow(length(unique(datTraits[,colnames(datTraits)==covariate])))
+finalcolors = colors[as.numeric(datTraits[,covariate])[mask]]
+#Plot samples with IDs and colour with their corresponding batch
+#samples will be disposed in 2D such that the distance between samples reflects differences
+#in log2 expression
+png(filename = paste0("../Plots/GTEx/Samples by ",covariate, ".png"))
+plotMDS(datExpr0[,mask],col=finalcolors,
+        main=paste0("MDS using ",covariate)) 
+  
+legend("topright",fill=colors,
+       legend=levels(datTraits[,covariate]))
+dev.off()
+
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+
+datTraits$SEX = as.factor(datTraits$SEX)
+datTraits$AGE = as.factor(datTraits$AGE)
+datTraits$DTHHRDY = as.factor(datTraits$DTHHRDY)
+
+png(filename = paste0("../Plots/GTEx/Prince plot samples by ",covariate, ".png"))
+pcres = prince(as.matrix(datExpr0),as.data.frame(datTraits[,colnames(datTraits) %in% c("SMNABTCHD","SEX", "AGE", "DTHHRDY")]),top=20)
+CoExpNets::princePlot(prince=pcres,main="All samples, batch uncorrected")
+dev.off()
+
+datTraits$SMTSISCH = as.numeric(datTraits$SMTSISCH)
+datTraits$RIN = as.numeric(datTraits$SMRIN)
+#library(sva)
+#datExpr0 = sva::ComBat(dat=datExpr0,batch=,mod=model.matrix(~braaksc + ceradsc, datTraits),par.prior=T)
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+
+library(limma)
+datExpr0 = limma::removeBatchEffect(datExpr0, batch = datTraits$SMNABTCHD, batch2 = datTraits$SEX, covariates = datTraits[,colnames(datTraits)%in% c("SMTSISCH", "SMRIN")], design = model.matrix(~AGE, datTraits))
+datExpr0 = limma::removeBatchEffect(datExpr0, batch = datTraits$DTHHRDY, design = model.matrix(~AGE, datTraits))
+
+png(filename = paste0("../Plots/GTEx/Prince plot corrected samples by ",covariate, ".png"))
+pcres = prince(as.matrix(datExpr0),datTraits[,colnames(datTraits) %in% c("SMNABTCHD","SEX", "AGE", "DTHHRDY")],top=20)
+CoExpNets::princePlot(prince=pcres,main="All samples, batch corrected")
+dev.off()
+
+
+#MDS takes a while to compute so we will use only 100 samples to represent instead of the total
+mask = sample(1:ncol(datExpr0),ncol(datExpr0))
+#Get one color for each batch category
+finalcolors = colors[as.numeric(datTraits[,covariate])[mask]]
+#Plot samples with IDs and colour with their corresponding batch
+#samples will be disposed in 2D such that the distance between samples reflects differences
+#in log2 expression
+png(filename = paste0("../Plots/GTEx/Corrected samples by ",covariate, ".png"))
+plotMDS(datExpr0[,mask],col=finalcolors,
+        main=paste0("MDS using ",covariate, " after correction"))
+legend("topright",fill=colors,
+       legend=levels(datTraits[,covariate]))
+dev.off()
+
+datExpr = t(datExpr0)
+save(datExpr, datTraits, file = "../ProcessedData/GTEx Hippo.rds")
+```
+
+```{r}
+load("../ProcessedData/GTEx Hippo.rds")
+
+library(CoExpNets)
+library(WGCNA)
+gc()
+
+#Make sure you have a file called results in your currend working directory!!!
+rm(list=setdiff(ls(), c("datExpr", "datTraits")))
+net = CoExpNets::getDownstreamNetwork(tissue="GTEx Hippo",
+                                      n.iterations=40,
+                                      net.type = "signed",
+                                      debug=F, fullAnnotation=FALSE,
+                                      expr.data=datExpr,
+                                      job.path="../results/")
+```
+
+netGTEx Hippo All Corrected 05exp.21.it.40.rds
+```{r, fig.height=20, fig.width=15}
+load("../ProcessedData/GTEx Hippo.rds")
+net.name ="netGTEx Hippo All Corrected 05exp 2.14.it.40.rds"
+
+tissue = paste("results/", net.name, sep = "")
+library(CoExpNets)
+library(WGCNA)
+femaleSamples = rownames(datExpr);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+datTraits$SEX = gsub(1, 0, datTraits$SEX)
+datTraits$AGE = gsub("20-29", 25, gsub("30-39", 35, gsub("40-49", 45, gsub("50-59", 55, gsub("60-69", 65, gsub("70-79", 75, datTraits$AGE))))))
+covs <- as.data.frame(apply(datTraits, 2, as.numeric))
+rownames(covs) = rownames(datTraits)
+covs = covs[,colnames(covs) %in% c("AGE","SMTSISCH", "SEX", "SMRIN")]
+
+
+CoExpNets::corWithNumTraits(which.one="new", tissue=tissue, covs = as.data.frame(covs), covlist = c("AGE","SMTSISCH", "SEX", "SMRIN"))
+CoExpNets::corWithCatTraits(which.one="new", tissue=tissue, covs = as.data.frame(datTraits), covlist = c("SMCENTER", "SMGEBTCH","SMNABTCH", "DTHHRDY", "SEX"))
+Allmms = CoExpNets::getMM(which.one="new",tissue=tissue,
+              genes= colnames(datExpr),expr.data.file = datExpr) #Get MM of genes
+```
+
+```{r}
+#remember to change beta for different networks
+Beta = 12
+dir.create("../results/GTExmodulestats/")
+
+MOI = c("grey60", "saddlebrown")
+
+Modules = lapply(MOI, function(Network){
+  Module <- mms_TOM(datExpr, Network, tissue, Beta)
+  write.csv(Module[[1]], file = paste0("../results/GTExmodulestats/",Network,"Module Membership.csv"))
+  write.table(Module[[2]], file= paste0("../results/GTExmodulestats/", "TOMs",Network,".txt"),sep = , quote=FALSE, row.names=FALSE, col.names = FALSE)
+  return(Module)
+} 
+)
+```
+
+```{r}
+library("biomaRt")
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = Module[[1]]$ensgene, mart = human, attributesL = c("mgi_symbol"), martL = mouse)
+library(dplyr)
+Enrichment = as.data.frame(genesV2$MGI.symbol)
+Enrichment[,2] = rep(Network)
+colnames(Enrichment) = NULL
+rownames(Enrichment) = NULL
+write.table(Enrichment, sep=",",  col.names=FALSE, row.names = FALSE ,file = paste0(Network, "Enrichment New.csv")) 
+```
+
+```{r}
+library(gprofiler2)
+Allgenes = gsub("\\..*","",Allgenes)
+Gprofiler <- gost(Module[[1]]$ensgene, organism = "hsapiens", ordered_query = TRUE, multi_query = FALSE, significant = TRUE, exclude_iea = TRUE,
+                  measure_underrepresentation = FALSE, evcodes = FALSE,
+                  user_threshold = 0.05, correction_method = c("bonferroni"),#"g_SCS", "bonferroni","fdr", "false_discovery_rate", "gSCS", "analytical",
+                  custom_bg = colnames(datExpr),
+                  numeric_ns = "", sources = NULL)
+gostplot(Gprofiler, capped = FALSE, interactive = TRUE, pal = c(`GO:MF`
+                                                                = "#dc3912", `GO:BP` = "#ff9900", `GO:CC` = "#109618", KEGG = "#dd4477",
+                                                                REAC = "#3366cc", WP = "#0099c6", TF = "#5574a6", MIRNA = "#22aa99", HPA
+                                                                = "#6633cc", CORUM = "#66aa00", HP = "#990099"))
+Gos = Gprofiler$result
+Gos = Gos[!Gos$source=="TF",]
+Gos = Gos[!Gos$source=="HPA",]
+Gos = Gos[order(Gos$p_value),]
+Gos$term_name = paste(Gos$term_name, Gos$term_id, sep = " ")
+Gos = Gos[colnames(Gos) %in% c("term_name", "p_value")]
+Gos = Gos[!duplicated(Gos$term_name),]
+rownames(Gos) = Gos$term_name
+Gos$term_name = NULL
+write.csv(Gos, file = "Gos.csv")
+```
+
+
+Now do some enrichment analysis
+
+```{r}
+#Load the background genes
+load("../ProcessedData/GTEx Genes.rds")
+dir.create("../results/GTExGos/")
+
+Enrichments = lapply(names(Modules), function(Module){
+  Gprofiler <- gost(Modules[[Module]][[1]]$ensgene, organism = "mmusculus", ordered_query = TRUE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = TRUE,
+                    measure_underrepresentation = FALSE, evcodes = FALSE,
+                    user_threshold = 0.05, correction_method = c("bonferroni"),
+                    custom_bg = AllGenes,
+                    numeric_ns = "", sources = NULL)
+  print(gostplot(Gprofiler, capped = FALSE, interactive = TRUE, pal = c(`GO:MF`
+                                                                  = "#dc3912", `GO:BP` = "#ff9900", `GO:CC` = "#109618", KEGG = "#dd4477",
+                                                                  REAC = "#3366cc", WP = "#0099c6", TF = "#5574a6", MIRNA = "#22aa99", HPA
+                                                                  = "#6633cc", CORUM = "#66aa00", HP = "#990099")))
+  GoResult = Gprofiler$result
+  GoResult = GoResult[!GoResult$source=="TF",]
+  GoResult = GoResult[order(GoResult$p_value),]
+  GoResult$term_name = paste(GoResult$term_name, GoResult$term_id, sep = " ")
+  GoResult = GoResult[colnames(GoResult) %in% c("term_name", "p_value")]
+  GoResult = GoResult[!duplicated(GoResult$term_name),]
+  rownames(GoResult) = GoResult$term_name
+  GoResult$term_name = NULL
+  write.csv(GoResult, file = paste0("../results/MouseACWTGos/MouseACWT_", Module, "_GoResult.csv"))
+  return(GoResult)
+}
+)
+```
+
+```{r}
+library(CoExpNets)
+library(WGCNA)
+CoExpNets::initDb()
+write.csv(CoExpNets::genAnnotationCellType(return.processed=F,
+                                           tissue= tissue,
+                                           which.one="new", notHuman = "False",plot.file=paste0("results/",net.name,".celltype.pdf"),
+ net.in=paste0("results/",net.name), legend=paste0("Age Data cell type signals")),paste0(net.name,"celltype.csv"))  #CTDB annotations - Cell type
+CTDB <- read.csv(file = paste0(net.name,"celltype.csv"))
+```
+
+```{r}
+load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+datExpr0 = as.data.frame(t(datExpr))
+datExpr0$MGI.symbol = rownames(datExpr0)
+library("biomaRt")
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  genesV2 = getLDS(attributesL = c("hgnc_symbol"), filters = "mgi_symbol", values = datExpr0$MGI.symbol, martL = human, attributes = c("mgi_symbol"), mart = mouse)
+library(dplyr)
+datExpr0 = inner_join(datExpr0, genesV2, by = "MGI.symbol")
+MGI = datExpr0$HGNC.symbol
+datExpr0 = datExpr0[,!colnames(datExpr0)%in%c("HGNC.symbol", "MGI.symbol")]
+datExpr0 = aggregate(datExpr0, by = list(MGI),mean)
+datExpr0 = tibble::column_to_rownames(datExpr0, var = "Group.1")
+#datExpr = t(log1p(datExpr0)) 
+datExpr = t(datExpr0)
+save(datExpr, datTraits, file = "../ProcessedData/WTage.LimmaBatch05 Human Genes.rds")
+```
+
+```{r}
+load("../ProcessedData/WTage.LimmaBatch05 Human Genes.rds")
+datExpr1 = datExpr
+load("../ProcessedData/GTEx Hippo.rds")
+rm(list=setdiff(ls(), c("datExpr", "datTraits", "datExpr1", "preservationOneWayNew")))
+library(WGCNA)
+library(CoExpNets)
+gc()
+net = readRDS("results/netGTEx Hippo All Corrected 05exp 2.14.it.40.rds")
+Pres = preservationOneWayNew(network = net, expr.data.files = list(datExpr, datExpr1), tissues = c("WT", "Sierksma"), permutations=200)
+write.csv(Pres[[1]], file = "../results/GTExHippoCorrectvsACWTlimma05AllZvalues.csv")
+write.csv(Pres[[2]], file = "../results/GTExHippoCorrectvsACWTlimma05AllPvalues.csv")
+```

@@ -1,0 +1,139 @@
+---
+title: "Apoe CoexpNets"
+output: html_document
+---
+
+```{r setup}
+#Load Packages 
+
+library(limma)
+library(swamp)
+library(WGCNA)
+library(CoExpNets)
+library(tibble)
+library(CoExpNets)
+library(biomaRt)
+library(dplyr)
+library(outliers)
+library(flashClust)
+```
+
+```{r}
+#Setup Files
+dir.create("../Plots/")
+dir.create("../Plots/Zhao/")
+```
+
+
+```{r}
+options(stringsAsFactors = FALSE);
+
+#Load the data
+datExpr0 = read.csv("../RawData/APOE_filtered_gene_cqn_log2rpkm.csv");
+datExpr0 = as.data.frame(datExpr0);
+datExpr0 = datExpr0[!duplicated(datExpr0[,1]),]; # remove multiples
+rownames(datExpr0) <- NULL
+datExpr0 <- column_to_rownames(datExpr0, var = "GeneID")
+traitData = read.csv("../RawData/APOE-TR_RNAseq_metadata.csv");
+Mouse = read.csv("../RawData/APOE-TR _mouse_metadata.csv")
+Specimen = read.csv("../RawData/APOE-TR_biospecimen_metadata.csv")
+
+#Do some cleaning
+Specimen = Specimen[Specimen$specimenID %in% traitData$specimenID,]
+allTraits = merge(traitData, Specimen, by = "specimenID")
+Mouse = Mouse[Mouse$individualID %in% allTraits$individualID,]
+Traits = merge(allTraits, Mouse, by = "individualID")
+rownames(Traits) <- Traits$specimenID
+datTraits <- Traits[,-c(3:6,8:23, 26:33)];
+datTraits$Age <- sapply(strsplit((datTraits$individualID), "_"), "[", 2)
+datTraits[is.na(datTraits$Age),]$Age = sapply(strsplit((datTraits[is.na(datTraits$Age),]$specimenID), "_"), "[", 2)
+datTraits$Age <- as.numeric(gsub("M", "", datTraits$Age))
+datTraits <- datTraits[,-c(1,2)]
+femaleSamples = colnames(datExpr0);
+rownames(datTraits) = gsub("-", ".", rownames(datTraits))
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+datTraits$genotype <- as.factor(gsub("APOE2", 0, gsub("APOE3", 1, gsub("APOE4", 2, datTraits$genotype)))) #replace WT with 0 and Trem2 R47H with 1
+datTraits$sex <- as.factor(gsub("female", 0, datTraits$sex))
+datTraits$sex <- as.factor(gsub("male", 1, datTraits$sex)) #replace Control with 0 and IL4 with 1
+datTraits$Apoe2vs3 <- as.numeric(gsub("0", 3, datTraits$genotype))
+datTraits$Apoe2vs3 <- as.numeric(gsub("1", 0,gsub("2", NA, datTraits$Apoe2vs3)))
+datTraits$Apoe4vs3 <- gsub("0", NA, datTraits$genotype)
+datTraits$Apoe4vs3 = as.numeric(gsub("1",0, datTraits$Apoe4vs3))
+datTraits$Apoe4vs2 <- as.numeric(gsub("0", 0, gsub("1",NA, datTraits$genotype)))
+datTraits$Group = rep(NA)
+datTraits[datTraits$genotype == 0 & datTraits$Age == 3,]$Group = 1
+datTraits[datTraits$genotype == 0 & datTraits$Age == 12,]$Group = 2
+datTraits[datTraits$genotype == 0 & datTraits$Age == 24,]$Group = 3
+datTraits[datTraits$genotype == 1 & datTraits$Age == 3,]$Group = 4
+datTraits[datTraits$genotype == 1 & datTraits$Age == 12,]$Group = 5
+datTraits[datTraits$genotype == 1 & datTraits$Age == 24,]$Group = 6
+datTraits[datTraits$genotype == 2 & datTraits$Age == 3,]$Group = 7
+datTraits[datTraits$genotype == 2 & datTraits$Age == 12,]$Group = 8
+datTraits[datTraits$genotype == 2 & datTraits$Age == 24,]$Group = 9
+datTraits <- datTraits[, !colnames(datTraits)== "litter"]
+common = intersect(rownames(datTraits),colnames(datExpr0))
+traitData = datTraits[common,]
+datExpr0 = datExpr0[,common]
+stopifnot(identical(colnames(datExpr0),rownames(traitData)))
+
+#Convert from ensembl gene id to symbols
+mart <- useDataset("mmusculus_gene_ensembl", useMart("ensembl"))
+x <- getBM(attributes=c('mgi_symbol', 'ensembl_gene_id'),
+               filters = 'ensembl_gene_id',
+               values = rownames(datExpr0),
+               mart = mart)
+datExpr0$ensembl_gene_id = rownames(datExpr0)
+datExpr0 = inner_join(datExpr0, x, by = "ensembl_gene_id")
+rownames(datExpr0) = datExpr0$ensembl_gene_id
+MGI = datExpr0$mgi_symbol
+datExpr0 = datExpr0[,!colnames(datExpr0)%in%c("ensembl_gene_id", "mgi_symbol")]
+datExpr0 = aggregate(datExpr0, by = list(MGI),mean)
+datExpr0 = column_to_rownames(datExpr0, var = "Group.1")
+datExpr0 = datExpr0[-1,]
+```
+
+```{r}
+#Only Keep Apoe3 samples
+datExpr0 = datExpr0[,datTraits$genotype == 1]
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+Rows = rownames(datExpr0)
+datExpr0 = as.data.frame(sapply(datExpr0, as.numeric))
+rownames(datExpr0) = Rows
+
+#Unlog then take pseudocount
+datExpr0 = (2^datExpr0)-1
+
+#Make matrix of meaningful covariates in data
+modelMatrix = model.matrix(~Age + sex, datTraits)
+
+datExpr = CoExpPrepare(datExpr0, datTraits, 0.05, 0.5, batches = "sequencingBatch", plots = "../Plots/Zhao/", modelMatrix = modelMatrix)
+```
+
+```{r}
+##Assess if there's any outlier samples
+#Get a distance matrix between pairs of samples
+sampdist = as.matrix(dist(datExpr))
+result = grubbs.test(apply(sampdist,1,sum))
+#Is the test significant at 95% confidence level?
+if(result$p.value < 0.05){
+  cat("We should drop out",names(result$p.value),"\n")
+  plot(flashClust(dist(datExpr), method = "average"),cex=0.5,
+       main=paste0("Detected outlier ",names(result$p.value)," in Samples"))
+}else
+  cat("No plausible outlier detected\n")
+```
+
+```{r}
+#Remove any outlier if detected
+datExpr <- datExpr[!rownames(datExpr) == "",]
+datTraits <- as.data.frame(datTraits[match(rownames(datExpr), rownames(datTraits)), ])
+
+save(datExpr, datTraits, file = "../ProcessedData/ZhaoPreProcessed.rds")
+```
+
+```{r}
+sessionInfo()
+```

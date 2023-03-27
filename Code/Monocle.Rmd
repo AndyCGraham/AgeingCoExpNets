@@ -1,0 +1,170 @@
+---
+title: "Monocle microglia"
+author: "Andy Graham"
+date: "7/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(monocle)
+library(dplyr)
+library(tibble)
+library(readr)
+library(viridis)
+library(tibble)
+```
+
+Load data:
+```{r}
+Carlo_KW <- read_delim("../RawData/metadata.tsv", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+Carlo_KW = Carlo_KW[Carlo_KW$tissue == "H",]
+Carlo_KW = Carlo_KW[Carlo_KW$genotype == "W",]
+Carlo_KW = column_to_rownames(Carlo_KW, var = "Barcode")
+
+#Monocle works with expression data (from UMI experiment) not normalized
+raw_KW <- as.matrix(readRDS("../RawData/rawcounts.rds"))
+raw_KW  = raw_KW [,rownames(Carlo_KW)]
+
+```
+
+## Semi-supervised Monocle on clusters 234
+
+Create CellDataSet:
+```{r cds}
+#data frame containing attributes of individual cells
+pd <- new("AnnotatedDataFrame", data = Carlo_KW)
+
+#data frame containing gene names
+fd <- data.frame(row.names(raw_KW))
+colnames(fd) <- c("gene_short_name")
+row.names(fd) <- row.names(raw_KW)
+fd <- new("AnnotatedDataFrame", data = fd)
+
+#Creates a new CellDateSet object from expression data matrix for an experiment, pd and fd
+cds <- newCellDataSet(as(as.matrix(raw_KW),"sparseMatrix"), 
+                      phenoData = pd, 
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size())
+rm(Carlo_KW, raw_KW,fd,pd)
+```
+
+Estimate size factors and dispersions:
+```{r}
+cds <- estimateSizeFactors(cds)
+gc()
+cds <- estimateDispersions(cds,cores=1)
+```
+
+Classify cells based on markers from Seurat DE:
+```{r}
+load("../ProcessedData/ScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.Data.Input.rds")
+to_be_tested <- row.names(subset(fData(cds),
+              gene_short_name %in% c(colnames(datExpr))))
+cds_subset <- cds[to_be_tested,]
+rm(datExpr, datTraits)
+diff_test_res <- differentialGeneTest(cds_subset,
+                    fullModelFormulaStr = "~res.0.4")
+diff_test_res[,c("gene_short_name", "pval", "qval")]
+
+ordering_genes <-
+   row.names(diff_test_res)[diff_test_res$qval < 0.025]
+
+cth <- newCellTypeHierarchy()
+
+cth <- addCellType(cth,
+                   "Interferon response Apoe+ microglia",
+                   classify_func = function(x) {(x["Ifit3",] | x["Ifit2",] >=1) & (x["Clec7a",] | x["Lpl",] | x["Axl",] >= 1)})
+cth <- addCellType(cth,
+                   "Interferon response Apoe- microglia",
+                   classify_func = function(x) { (x["Ifit3",] | x["Ifit2",] >= 1) & x["Clec7a",] < 1 & x["Lpl",] < 1 & x["Axl",] < 1})
+cth <- addCellType(cth,
+                   "Brown-expressing microglia",
+                  classify_func = function(x) {x["Ifit3",] < 1 & x["Ifit2",] < 1  & x["Apoe",] > 0 & (x["Clec7a",] | x["Lpl",] | x["Axl",] >= 1)})
+cth <- addCellType(cth,
+                   "Apoe+ve Microglia",
+                   classify_func =
+                function(x) {x["Clec7a",] < 1 & x["Lpl",] < 1 & x["Axl",] < 1  & x["Ifit2",] < 1 & x["Ifit3",] < 1 & x["Apoe",] > 0})
+cth <- addCellType(cth,
+                   "Homeostatic microglia",
+                   classify_func =
+                function(x) {x["Ifit3",] < 1 & x["Ifit2",] < 1  &  x["Apoe",] ==0})
+
+cds <- classifyCells(cds, cth)
+pData(cds)$CellType %>% table()
+pData(cds)$Cluster <- as.factor(pData(cds)$res.0.4)
+```
+
+Use the genes qval < 0.025 to order a single cell trajectory:
+```{r}
+cds <- setOrderingFilter(cds, ordering_genes)
+cds <- reduceDimension(cds, max_components = 2,
+                       method = 'DDRTree', norm_method = 'log')
+cds <- orderCells(cds)
+plot_cell_trajectory(cds, color_by = "State") +
+  scale_color_brewer(palette = "Set3",direction = 1)
+cds$Cluster = factor(gsub(0, "HM1", gsub(1, "HM2", gsub(2, "ARM", gsub(3, "TRM", gsub(4, "IRM", gsub(5, "CPM", cds$res.0.4)))))), levels = c("HM1", "HM2", "TRM", "ARM", "IRM", "CPM"))
+plot_cell_trajectory(cds, color_by = "Cluster",show_branch_points = TRUE) +
+  scale_color_brewer(palette = "Set3",direction = 1) + theme(text = element_text(size = 13, family = "arial"), legend.text = element_text(size = 15, family = "arial"), legend.title = element_text(size = 15, family = "arial"))
+ggsave(
+    filename = paste0("../Plots/monocle/ClustersonTraj.png"),
+    device = "png",
+    units = c("in"),
+    width = 6.75,
+    height = 5,
+    dpi = 300
+  )
+save(cds, file = "../ProcessedData/Monocle.rds")
+```
+
+Plot Module Expression
+```{r}
+net.name = "netScAgeHippoData.01v.Rowclust025.Corrected.1000.1500.10.it.20.rds"
+net = readRDS(paste0("../results/", net.name)) 
+Assignments = as.data.frame(net$moduleColors)
+Assignments$Genes = rownames(Assignments)
+Assignments = Assignments[,c(2,1)]
+traj.plot = plot_cell_trajectory(cds)
+Carlo_KW <- read_delim("../RawData/metadata.tsv", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+Carlo_KW = Carlo_KW[Carlo_KW$tissue == "H",]
+Carlo_KW = Carlo_KW[Carlo_KW$genotype == "W",]
+Carlo_KW = column_to_rownames(Carlo_KW, var = "Barcode")
+
+#Monocle works with expression data (from UMI experiment) not normalized
+load("../ProcessedData/scNormCounts.rds")
+datExpr0  = datExpr0[,rownames(Carlo_KW)]
+datExpr0 = as.data.frame(datExpr0)
+datExpr0 = rownames_to_column(datExpr0, var = "Genes")
+```
+limits = c(Min, Max) 
++ guides(colour=guide_legend(title=paste0("log(", Module," expression", ")")))
+```{r}
+dir.create("../Plots/monocle/")
+
+point.data <- ggplot_build(traj.plot)[["plot"]][["data"]]
+newNames = setNames(c("ARM-associated", "Interferon", "Ribosomal", "HM2-associated", "HM1-associated", "TGF-beta"), c("purple", "orange", "lightyellow", "brown", "darkred", "royalblue"))
+
+for (Module in c("purple", "orange", "lightyellow", "brown", "darkred", "royalblue")){
+
+  point.data = GetModuleExpsforMonocle(Module)
+  colnames(point.data)[length(point.data)] = paste0(newNames[Module], " Expression")
+  Colour = paste0(newNames[Module], " Expression")
+  Max = max(point.data[,colnames(point.data)==Colour])
+  Min = min(point.data[,colnames(point.data)==Colour])
+  Mid = median(point.data[,colnames(point.data)==Colour])
+  ggplot(point.data, aes(x = data_dim_1, y = data_dim_2, colour = point.data[,colnames(point.data)==Colour])) +  geom_point() + 
+   scale_colour_viridis(option = "C", discrete = FALSE) + theme(panel.grid.major = element_blank(),
+  panel.background = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + ylab("Component 2") + xlab("Component 1") + labs(colour = Colour) + ggtitle(paste0(newNames[Module], " Module Expression Along Activation Trajectory")) + theme(plot.title = element_text(hjust = 0.5), text = element_text(size = 13, family = "arial"), legend.position = "top", legend.key.width = unit(1.25, "cm"))
+  ggsave(
+    filename = paste0("../Plots/monocle/",Module,net.name, ".png"),
+    device = "png",
+    units = c("in"),
+    width = 6.75,
+    height = 5,
+    dpi = 300
+  )
+}
+```

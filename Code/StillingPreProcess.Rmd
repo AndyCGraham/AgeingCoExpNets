@@ -1,0 +1,81 @@
+---
+title: "StillingPreProcess"
+output: html_document
+---
+
+```{r setup}
+#Load Packages 
+
+library(limma)
+library(swamp)
+library(WGCNA)
+library(CoExpNets)
+library(tibble)
+library(CoExpNets)
+library(biomaRt)
+library(dplyr)
+library(outliers)
+library(flashClust)
+library(tibble)
+
+source("CoExp_Fun.R")
+```
+
+Load Data 
+
+```{r}
+mydir = "../RawData/"
+myfiles = list.files(path=mydir, pattern="*geneCounts.txt.gz", full.names=TRUE)
+library(data.table)
+datExpr0 <- rbindlist(sapply(myfiles, fread, simplify = FALSE),
+                use.names = TRUE, idcol = "FileName")
+library(tidyr)
+datExpr0 <- spread(datExpr0, V1, V2)
+datExpr0 <- t(datExpr0)
+colnames(datExpr0) = c("3Ma", "3Mb", "3Mc", "3Md", "3Me", "24Ma", "24Mb", "24Mc", "24Md", "24Me", "24Mf", "3Mf", "3Mg", "3Mh", "29Ma", "29Mb", "29Mc")
+datExpr0 = datExpr0[-c(1:6),]
+
+#Convert from gene id to symbol
+mart <- useDataset("mmusculus_gene_ensembl", useMart("ensembl"))
+x <- getBM(attributes=c('mgi_symbol', 'ensembl_gene_id'),
+               filters = 'ensembl_gene_id',
+               values = rownames(datExpr0),
+               mart = mart)
+datExpr0 = as.data.frame(datExpr0)
+datExpr0$ensembl_gene_id = rownames(datExpr0)
+datExpr0 = inner_join(datExpr0, x, by = "ensembl_gene_id")
+
+##Agregate gene symbols with same gene ids
+MGI = datExpr0$mgi_symbol
+datExpr0 = datExpr0[,!colnames(datExpr0)%in%c("ensembl_gene_id", "mgi_symbol")]
+datExpr0 = apply(datExpr0, 2, as.numeric)
+datExpr0 = aggregate(datExpr0, by = list(MGI),mean)
+datExpr0 = column_to_rownames(datExpr0, var = "Group.1")
+
+#Get more metadata from GEO
+datExpr0 = datExpr0[-1,]
+datTraits = GEOquery::getGEO("GSE61915")
+datTraits = datTraits[["GSE61915_series_matrix.txt.gz"]]
+datTraits = datTraits@phenoData
+datTraits = datTraits@data
+datTraits = datTraits[,c(1,45)]
+rownames(datTraits) = NULL
+datTraits = column_to_rownames(datTraits, var = "title")
+colnames(datExpr0) = rownames(datTraits)
+datTraits$Age = as.numeric(gsub(" months", "", datTraits$`age:ch1`))
+datTraits$Group = recode(as.character(datTraits$Age), "3" = "1", "24" = "2", "29" = "3")
+```
+
+```{r}
+#Normalise and filter (no batches reported)
+datExpr0 = as.data.frame(Seurat::NormalizeData(datExpr0, normalization.method = "RC",
+  scale.factor = 1000000))
+
+datExpr = CoExpPrepare(datExpr0, datTraits, 0.05, 0.5)
+
+save(datExpr, datTraits, file = "../ProcessedData/StillingAge05.DataInput.rds")
+```
+
+```{r}
+sessionInfo()
+```

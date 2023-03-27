@@ -1,0 +1,180 @@
+---
+title: "Nugent Demyelination SC"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Load Packages
+library(readr)
+library(tibble)
+library(tidyverse)
+library(Matrix)
+library(cowplot)
+library(ggplot2)
+library(scales)
+library(Seurat)
+library(limma)
+library(patchwork)
+library(AnnotationHub)
+library(gprofiler2)
+library(WGCNA)
+library(CoExpNets)
+library(Seurat)
+source("CoExp_Fun.R")
+```
+
+Load the data
+
+```{r}
+library(readr)
+library(tibble)
+library(readr)
+library(Seurat)
+datExpr0 <- read_csv("../RawData/GSE130626_umi_counts.csv.gz")
+Genes = read_csv("../RawData/GSE130626_gene_info.csv.gz")
+datTraits <- read_csv("../RawData/GSE130626_cell_info.csv.gz")
+
+datTraits$sample = datTraits$sce_source
+datTraits = column_to_rownames(datTraits, var = "cell_id")
+datTraits$cluster = as.factor(gsub("cluster_0", "", datTraits$snn_cluster))
+datExpr0 = datExpr0[,-1]
+datExpr0 = aggregate(datExpr0, by = list(Genes$symbol), sum)
+rownames(datExpr0) = NULL
+datExpr0 = column_to_rownames(datExpr0, var = "Group.1")
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+datExpr0 = LogNormalize(datExpr0, scale.factor = 10000, verbose = TRUE)
+```
+
+QC Plots
+
+```{r}
+
+# Extract IDs for mitochondrial genes
+ah <- AnnotationHub() 
+ahDb <- query(ah, 
+              pattern = c("Mus musculus", "EnsDb"), 
+              ignore.case = TRUE)
+
+id <- ahDb %>%
+  mcols() %>%
+  rownames() %>%
+  tail(n = 1)
+
+edb <- ah[[id]]
+
+# Extract gene-level information from database
+annotations <- genes(edb, 
+                     return.type = "data.frame")
+
+# Select annotations of interest
+annotations <- annotations %>%
+  dplyr::select(gene_id, gene_name, gene_biotype, seq_name, description, entrezid)
+
+# Extract IDs for mitochondrial genes
+mt <- annotations %>% 
+  dplyr::filter(seq_name == "MT") %>%
+  dplyr::pull(gene_name)
+  
+#Calculate nGenes/reads
+datTraits$nCount_RNA <- colSums(datExpr0, na.rm = T)
+
+datTraits$nFeature_RNA <- colSums(datExpr0 > 0)
+
+# Number of UMIs assigned to mitochondrial genes
+datTraits$mtUMI <- colSums(datExpr0[which(rownames(datExpr0) %in% mt),], na.rm = T)
+
+# Ensure all NAs receive zero counts
+datTraits$mtUMI[is.na(datTraits$mtUMI)] <- 0
+# Calculate of mitoRatio per cell
+datTraits$mitoRatio <- datTraits$mtUMI/datTraits$nCount_RNA
+
+# Keep cells with nUMI greater than 100
+datTraits$nCount_RNA = as.numeric(datTraits$nCount_RNA)
+datTraits$nFeature_RNA = as.numeric(datTraits$nFeature_RNA)
+idx <- which(datTraits$nCount_RNA > 100)
+
+# Extract the counts for those cells
+datExpr0 <- datExpr0[, idx]
+
+# Extract the metadata for those cells
+datTraits <- datTraits[idx,]
+
+
+# Create a data frame containing the metrics for visualizations
+metrics <- datTraits
+
+#Number of cells/Sample
+metrics %>% 
+  ggplot(aes(x=sample, fill=sample)) + 
+  geom_bar() + 
+  ggtitle("NCells")
+
+# Visualize the number UMIs/transcripts per cell
+metrics %>% 
+  ggplot(aes(color=sample, x=nCount_RNA, fill= sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  ylab("log10 cell density") +
+  geom_vline(xintercept = 3000)
+
+# Visualize the distribution of genes detected per cell via histogram
+metrics %>% 
+  ggplot(aes(color=sample, x=nFeature_RNA, fill= sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 800)
+
+# Visualize the distribution of genes detected per cell via boxplot
+metrics %>% 
+  ggplot(aes(x=sample, y=log10(nFeature_RNA), fill=sample)) + 
+  geom_boxplot() + 
+  ggtitle("NCells vs NGenes")
+
+# Visualize the correlation between genes detected and number of UMIs and determine whether strong presence of cells with low numbers of genes/UMIs
+metrics %>% 
+  ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) + 
+  geom_point() + 
+  stat_smooth(method=lm) +
+  scale_x_log10() + 
+  scale_y_log10() + 
+  geom_vline(xintercept = 2200) +
+  geom_hline(yintercept = 1800) +
+  facet_wrap(~sample)
+
+# Visualize the distribution of mitochondrial gene expression detected per cell
+metrics %>% 
+  ggplot(aes(color=sample, x=mitoRatio, fill=sample)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 0.03)
+
+metrics$log10GenesPerUMI <- log10(metrics$nCount_RNA/metrics$nFeature_RNA)
+# Visualize the overall novelty of the gene expression by visualizing the genes detected per UMI
+metrics %>%
+  ggplot(aes(x=log10GenesPerUMI, color = sample, fill=sample)) +
+  geom_density() + geom_vline(xintercept = 0)
+metrics$cells <- rownames(metrics)
+```
+Filter cells and genes
+
+```{r}
+keep <- metrics %>%
+  dplyr::filter(nFeature_RNA > 1000 , 
+                nCount_RNA > 2000
+  ) %>% 
+  pull(cells)
+
+# Subset the cells to only include those that meet the thresholds specified
+datExpr0 <- datExpr0[ ,keep]
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+
+#Process for CoExpNets
+datExpr = CoExpPrepareSC(as.matrix(datExpr0), datTraits, 0.01, 0.025)
+
+save(datExpr, datTraits, file = "../ProcessedData/NugentSC.PreservationInput.rds")
+```
+

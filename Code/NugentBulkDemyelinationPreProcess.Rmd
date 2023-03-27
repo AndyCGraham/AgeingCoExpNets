@@ -1,0 +1,72 @@
+---
+title: "Nugent et al Demyelination Bulk"
+output: html_document
+---
+
+```{r setup}
+#Load Packages
+library(CoExpNets)
+library(dplyr)
+library(tibble)
+library(limma)
+library(readr)
+library(DESeq2)
+
+Sys.setenv("VROOM_CONNECTION_SIZE" = 131072 * 2)
+```
+
+
+Get data and recode some metadata columns 
+
+```{r}
+datExpr0 <- read.delim("../RawData/GSE124266_DST11.tab.gz", row.names=1)
+datExpr0 = datExpr0[,-c(1:2)]
+
+datTraits = GEOquery::getGEO("GSE124266")
+datTraits = datTraits[["GSE124266_series_matrix.txt.gz"]]
+datTraits = datTraits@phenoData
+datTraits = datTraits@data
+datTraits = datTraits[,c(10,49,16,17,25)]
+datTraits$timepoint = as.numeric(gsub("timepoint: ", "", datTraits$characteristics_ch1.6))
+rownames(datTraits) = colnames(datExpr0)
+datTraits$Het = rep(0)
+datTraits[datTraits$characteristics_ch1== "genotype: Trem2 +/-",]$Het = 1
+datTraits$WT = rep(0)
+datTraits[datTraits$characteristics_ch1== "genotype: Trem2 +/+",]$WT = 1
+datTraits$KO = rep(0)
+datTraits[datTraits$characteristics_ch1== "genotype: Trem2 -/-",]$KO = 1
+datExpr0 = datExpr0[,grep("M", rownames(datTraits))]
+datTraits = datTraits[grep("M", rownames(datTraits)),]
+datTraits$diet = datTraits$`diet:ch1`
+datTraits = datTraits[,-c(1:5)]
+
+#Remove non WT samples
+datTraits[datTraits$diet == "control",]$timepoint = 0
+datExpr0 = datExpr0[,datTraits$WT == 1]
+datTraits <- as.data.frame(datTraits[match(colnames(datExpr0), rownames(datTraits)), ])
+```
+
+Normalise, filter lowly expressed genes, and save 
+
+```{r}
+datExpr0 = as.matrix(datExpr0)
+
+dds <- DESeqDataSetFromMatrix(countData = datExpr0, colData = datTraits, design= ~1)
+dds <- estimateSizeFactors(dds)
+datExpr0 <- counts(dds, normalized=TRUE)
+
+#exclude lowly expressed genes
+getexp <- apply(datExpr0, 1, mean)
+param <- 1.5
+datExpr0 <- datExpr0[getexp > param & !is.na(getexp), ] 
+datExpr0 = log2(datExpr0 + 1)
+
+#Transpose and save
+datExpr <- as.data.frame(t(datExpr0))
+
+save(datExpr, datTraits, file = "../ProcessedData/NugentDemyelinationPreProcessed.rds")
+```
+
+```{r}
+sessionInfo()
+```

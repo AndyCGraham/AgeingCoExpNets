@@ -1,0 +1,383 @@
+---
+title: "Bulk Mouse AC CoExpNets"
+output: html_document
+date: "2023-02-22"
+---
+
+```{r setup}
+#Load Packages
+library(readr)
+library(tibble)
+library(tidyverse)
+library(Matrix)
+library(cowplot)
+library(ggplot2)
+library(scales)
+library(Seurat)
+library(limma)
+library(patchwork)
+library(AnnotationHub)
+library(gprofiler2)
+library(limma)
+library(swamp)
+library(outliers)
+library(flashClust)
+library(WGCNA)
+library(CoExpNets)
+library(tidyr)
+library(readxl)
+library(tibble)
+library("ggpubr")
+source("CoExp_Fun.R")
+```
+
+```{r}
+#Setup Files
+dir.create("../Plots/")
+dir.create("../Plots/MouseAC/")
+```
+
+First we load in data, then do some cleaning
+
+```{r}
+traits = read.csv("../RawData/pathology updated for RNAseq Apr17.csv");
+datExpr0 = read_excel("../RawData/geneQuantification_TPM_sampleinfo MOD_DS 11May18.xlsx")
+
+datExpr0 = as.data.frame(datExpr0);
+datExpr0 = datExpr0[!duplicated(datExpr0[,1]),]; # remove multiples
+rownames(datExpr0) <- NULL
+datExpr0 = column_to_rownames(datExpr0, var = "SampleName")  
+colnames(datExpr0) = datExpr0[1,]
+colnames(datExpr0) = gsub("RNA_", "", colnames(datExpr0))
+traits$Sample.ID = gsub("_133_2", "", traits$Sample.ID)
+datExpr0 = datExpr0[,colnames(datExpr0) %in% traits$Sample.ID]
+
+##Only keep traits we want, and add in batch, lane, and group variables
+rownames(traits)=traits[,5];
+allTraits <- traits[,-c(1,2,4,6,7,10)];
+allTraits= allTraits[, -2];
+rownames(allTraits)=rownames(traits);
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(allTraits));
+datTraits <- as.data.frame(allTraits[traitRows, ]);
+datTraits$batch = rep(NA)
+datTraits[rownames(datTraits)%in% c("1145_HIP", "1462_HIP", "1463_HIP", "1472_HIP", "1816_HIP", "1818_HIP", "1825_HIP", "2152_HIP", "2393A_HIP", "2417_HIP", "454_HIP", "835_HIP", "1150_HIP", "1474_HIP", "1838_HIP", "1839_HIP", "2098_HIP", "2099_HIP", "2337_HIP", "2392_HIP", "451_HIP", "809_HIP", "811_HIP", "812_HIP", "113_HIP", "1151_HIP", "1161_HIP", "154_HIP", "1819_HIP", "2153_HIP", "810_HIP", "97_9_1_HIP", "1105_HIP", "1461_HIP", "1494_HIP", "1808_HIP", "1817_HIP", "2330_HIP", "2416_HIP", "452_HIP", "453_HIP"),]$batch = 1
+datTraits[rownames(datTraits)%in% c("2187_HIP", "2297_HIP", "2314_HIP",  "2350_HIP", "2351_HIP", "2431_HIP", "968_HIP", "1160_HIP", "2125_HIP", "2306_HIP", "2344_HIP", "2374_HIP", "2375_HIP", "2434_HIP", "1106_HIP"),]$batch = 2
+datTraits[rownames(datTraits)%in% c("2154_HIP", "2155_HIP", "2331_HIP", "2357_HIP", "2376_HIP", "2415_HIP", "2425_HIP", "2438_HIP", "2439_HIP", "966_HIP", "967_HIP", "969_HIP", "1149_HIP", "2336_HIP", "2342_HIP", "2359_HIP", "2360_HIP", "2391_HIP", "2398_HIP", "2423_HIP", "2424_HIP", "2440_HIP", "2442_HIP", "2443_HIP", "1107_HIP", "1809_HIP", "2319_HIP", "2335_HIP", "2338_HIP", "2339_HIP", "2418_HIP", "475_HIP", "476_HIP", "492_HIP", "493_HIP", "510_HIP","1108_HIP", "1473_HIP", "1810_HIP", "1811_HIP", "1824_HIP", "1826_HIP", "460_HIP", "478_HIP", "509_HIP", "832_HIP", "833_HIP", "834_HIP"),]$batch = 3
+datTraits$lane = rep(NA)
+datTraits[rownames(datTraits)%in% c("1145_HIP", "1462_HIP", "1463_HIP", "1472_HIP", "1816_HIP", "1818_HIP", "1825_HIP", "2152_HIP", "2393A_HIP", "2417_HIP", "454_HIP", "835_HIP"),]$lane = "1a"
+datTraits[rownames(datTraits)%in% c("1150_HIP", "1474_HIP", "1838_HIP", "1839_HIP", "2098_HIP", "2099_HIP", "2337_HIP", "2392_HIP", "451_HIP", "809_HIP", "811_HIP", "812_HIP"),]$lane = "1b"
+datTraits[rownames(datTraits)%in% c("812_HIP", "113_HIP", "1151_HIP", "1161_HIP", "154_HIP", "1819_HIP", "2153_HIP", "810_HIP", "97_9_1_HIP"),]$lane = "1c"
+datTraits[rownames(datTraits)%in% c("1105_HIP", "1461_HIP", "1494_HIP", "1808_HIP", "1817_HIP", "2330_HIP", "2416_HIP", "452_HIP", "453_HIP"),]$lane = "1d"
+datTraits[rownames(datTraits)%in% c("2187_HIP", "2297_HIP", "2314_HIP", "2334_HIP", "2350_HIP", "2351_HIP", "2431_HIP", "968_HIP"),]$lane = "2a"
+datTraits[rownames(datTraits)%in% c("1160_HIP", "2125_HIP", "2306_HIP", "2344_HIP", "2374_HIP", "2375_HIP", "2434_HIP", "1106_HIP"),]$lane = "2b"
+datTraits[rownames(datTraits)%in% c("2154_HIP", "2155_HIP", "2331_HIP", "2357_HIP", "2376_HIP", "2415_HIP", "2425_HIP", "2438_HIP", "2439_HIP", "966_HIP", "967_HIP", "969_HIP"),]$lane = "3a"
+datTraits[rownames(datTraits)%in% c("1149_HIP", "2336_HIP", "2342_HIP", "2359_HIP", "2360_HIP", "2391_HIP", "2398_HIP", "2423_HIP", "2424_HIP", "2440_HIP", "2442_HIP", "2443_HIP"),]$lane = "3b"
+datTraits[rownames(datTraits)%in% c("1107_HIP", "1809_HIP", "2319_HIP", "2335_HIP", "2338_HIP", "2339_HIP", "2418_HIP", "475_HIP", "476_HIP", "492_HIP", "493_HIP", "510_HIP"),]$lane = "3c"
+datTraits[rownames(datTraits)%in% c("1108_HIP", "1473_HIP", "1810_HIP", "1811_HIP", "1824_HIP", "1826_HIP", "460_HIP", "478_HIP", "509_HIP", "832_HIP", "833_HIP", "834_HIP"),]$lane = "3d"
+datTraits$group = gsub(8, 1, gsub(16, 2, gsub(32, 3, gsub(72, 4, datTraits$AGE_cat))))
+datTraits$Group = rep(NA)
+datTraits[datTraits$MODELDIS == 1 & datTraits$AGE_cat == 8,]$Group = 1
+datTraits[datTraits$MODELDIS == 1 & datTraits$AGE_cat == 16,]$Group = 2
+datTraits[datTraits$MODELDIS == 1 & datTraits$AGE_cat == 32,]$Group = 3
+datTraits[datTraits$MODELDIS == 1 & datTraits$AGE_cat == 72,]$Group = 4
+datTraits[datTraits$MODELDIS == 2 & datTraits$AGE_cat == 8,]$Group = 5
+datTraits[datTraits$MODELDIS == 2 & datTraits$AGE_cat == 16,]$Group = 6
+datTraits[datTraits$MODELDIS == 2 & datTraits$AGE_cat == 32,]$Group = 7
+datTraits[datTraits$MODELDIS == 2 & datTraits$AGE_cat == 72,]$Group = 8
+datTraits[datTraits$MODELDIS == 3 & datTraits$AGE_cat == 8,]$Group = 9
+datTraits[datTraits$MODELDIS == 3 & datTraits$AGE_cat == 16,]$Group = 10
+datTraits[datTraits$MODELDIS == 3 & datTraits$AGE_cat == 32,]$Group = 11
+datTraits[datTraits$MODELDIS == 3 & datTraits$AGE_cat == 72,]$Group = 12
+datTraits[datTraits$MODELDIS == 5 & datTraits$AGE_cat == 8,]$Group = 13
+datTraits[datTraits$MODELDIS == 5 & datTraits$AGE_cat == 16,]$Group = 14
+datTraits[datTraits$MODELDIS == 5 & datTraits$AGE_cat == 32,]$Group = 15
+datTraits[datTraits$MODELDIS == 5 & datTraits$AGE_cat == 72,]$Group = 16
+datTraits[datTraits$MODELDIS == 4 & datTraits$AGE_cat == 8,]$Group = 17
+datTraits[datTraits$MODELDIS == 4 & datTraits$AGE_cat == 16,]$Group = 18
+datTraits[datTraits$MODELDIS == 4 & datTraits$AGE_cat == 32,]$Group = 19
+datTraits[datTraits$MODELDIS == 4 & datTraits$AGE_cat == 72,]$Group = 20
+datTraits[datTraits$MODELDIS == 6 & datTraits$AGE_cat == 8,]$Group = 21
+datTraits[datTraits$MODELDIS == 6 & datTraits$AGE_cat == 16,]$Group = 22
+datTraits[datTraits$MODELDIS == 6 & datTraits$AGE_cat == 32,]$Group = 23
+datTraits[datTraits$MODELDIS == 6 & datTraits$AGE_cat == 72,]$Group = 24
+datTraits$AGE_cat = as.numeric(datTraits$AGE_cat)
+datTraits$MODELDIS = as.factor(datTraits$MODELDIS)
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ]);
+gc()
+```
+
+
+```{r}
+#Remove character data in our expression matrix, and convert rest to numeric
+datExpr0 = datExpr0[-c(1:3),]
+Rows = rownames(datExpr0)
+datExpr0 = as.data.frame(sapply(datExpr0, as.numeric))
+rownames(datExpr0) = Rows
+
+#Remove AD model samples, as we're interested in WT ageing
+datExpr0 = datExpr0[,datTraits$Disease==0]
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+
+#Get genes expressed above our threshold and save these for later analysis
+AllGenes = rownames(getExp(as.matrix(datExpr0), datTraits, 0.5))
+save(AllGenes, file = "../ProcessedData/AGEWT_genes.rds")
+
+#Filter and batch correct
+modelMatrix = model.matrix(~AGE_cat, datTraits) #Covariates we want to preserve
+
+datExpr = CoExpPrepare(datExpr0, datTraits, 0.05, 0.5, batches = "batch", plots = "../Plots/MouseAC/", modelMatrix = modelMatrix)
+
+##Assess if there's any outlier samples
+#Get a distance matrix between pairs of samples
+sampdist = as.matrix(dist(datExpr))
+result = grubbs.test(apply(sampdist,1,sum))
+#Is the test significant at 95% confidence level?
+if(result$p.value < 0.05){
+  cat("We should drop out",names(result$p.value),"\n")
+  plot(flashClust(dist(datExpr), method = "average"),cex=0.5,
+       main=paste0("Detected outlier ",names(result$p.value)," in Samples"))
+}else
+  cat("No plausible outlier detected\n")
+```
+
+```{r}
+#Remove any outlier if detected
+datExpr <- datExpr[!rownames(datExpr) == "",]
+datTraits <- as.data.frame(datTraits[match(rownames(datExpr), rownames(datTraits)), ])
+
+#Save
+save(datExpr, datTraits, file = "../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+```
+
+Now we run CoExpNets
+
+```{r}
+load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+#All we need is expression and trait data
+gc()
+net = CoExpNets::getDownstreamNetwork(tissue="WTage.LimmaBatch05",
+                                      n.iterations=40,
+                                      net.type = "signed",
+                                      debug=F, fullAnnotation=FALSE,
+                                      expr.data=datExpr,
+                                      job.path="../results/")
+```
+
+Now lets assess the results
+
+```{r, fig.height=20, fig.width=15}
+load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+net.name ="netWTage.LimmaBatch05.12.it.40.rds" 
+tissue = paste("../results/", net.name, sep = "")
+
+femaleSamples = rownames(datExpr);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ])
+covs <- as.data.frame(apply(datTraits, 2, as.numeric))
+rownames(covs) = rownames(datTraits)
+covs = covs[,colnames(covs) %in% c("AGE_cat","batch")]
+
+CoExpNets::corWithNumTraits(which.one="new", tissue=tissue, covs = as.data.frame(covs), covlist = c("AGE_cat","batch"))
+#dev.off()
+CoExpNets::corWithCatTraits(which.one="new", tissue=tissue, covs = as.data.frame(datTraits), covlist = c("lane", "batch"))
+Allmms = CoExpNets::getMM(which.one="new",tissue=tissue,
+              genes= colnames(datExpr),expr.data.file = datExpr) #Get MM of genes
+write.csv(table(Allmms$module), file = "../results/MouseACModuleSizes.csv") #save module sizes for later
+```
+
+No extract the co-expression metrics for modules of interes
+```{r}
+#remember to change beta for different networks
+Beta = 12
+dir.create("../results/MouseACmodulestats/")
+
+MOI = c("magenta", "plum1")
+
+Modules = lapply(MOI, function(Network){
+  Module <- mms_TOM(datExpr, Network, tissue, Beta)
+  write.csv(Module[[1]], file = paste0("../results/MouseACmodulestats/",Network,"Module Membership.csv"))
+  write.table(Module[[2]], file= paste0("../results/MouseACmodulestats/", "TOMs",Network,".txt"),sep = , quote=FALSE, row.names=FALSE, col.names = FALSE)
+  return(Module)
+} 
+)
+```
+
+Now do some enrichment analysis
+
+```{r}
+#Load the background genes
+load("../ProcessedData/AGEWT_genes.rds")
+dir.create("../results/MouseACWTGos/")
+
+Enrichments = lapply(names(Modules), function(Module){
+  Gprofiler <- gost(Modules[[Module]][[1]]$ensgene, organism = "mmusculus", ordered_query = TRUE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = TRUE,
+                    measure_underrepresentation = FALSE, evcodes = FALSE,
+                    user_threshold = 0.05, correction_method = c("bonferroni"),
+                    custom_bg = AllGenes,
+                    numeric_ns = "", sources = NULL)
+  print(gostplot(Gprofiler, capped = FALSE, interactive = TRUE, pal = c(`GO:MF`
+                                                                  = "#dc3912", `GO:BP` = "#ff9900", `GO:CC` = "#109618", KEGG = "#dd4477",
+                                                                  REAC = "#3366cc", WP = "#0099c6", TF = "#5574a6", MIRNA = "#22aa99", HPA
+                                                                  = "#6633cc", CORUM = "#66aa00", HP = "#990099")))
+  GoResult = Gprofiler$result
+  GoResult = GoResult[!GoResult$source=="TF",]
+  GoResult = GoResult[order(GoResult$p_value),]
+  GoResult$term_name = paste(GoResult$term_name, GoResult$term_id, sep = " ")
+  GoResult = GoResult[colnames(GoResult) %in% c("term_name", "p_value")]
+  GoResult = GoResult[!duplicated(GoResult$term_name),]
+  rownames(GoResult) = GoResult$term_name
+  GoResult$term_name = NULL
+  write.csv(GoResult, file = paste0("../results/MouseACWTGos/MouseACWT_", Module, "_GoResult.csv"))
+  return(GoResult)
+}
+)
+```
+
+Now lets assess if our modules are preserved in comparable datasets - i.e. are the gene modules also co-expressed in this independent data
+
+```{r}
+#Sierksma Data
+load("../ProcessedData/Sierksma.PreservationInput.rds")
+datExpr1 = datExpr
+load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+gc()
+net = readRDS("../results/netWTage.LimmaBatch05.12.it.40.rds")
+Pres = preservationOneWay(network = net, expr.data.files = list(datExpr, datExpr1), tissues = c("WT", "Sierksma"), permutations=200)
+write.csv(Pres[[1]], file = "../results/ACWTlimma05AllvsSierksmaZvalues.csv")
+write.csv(Pres[[2]], file = "../results/ACWTlimma05AllvsSierksmaPvalues.csv")
+
+##Stilling data
+load("../ProcessedData/StillingPreProcessed.rds")
+datExpr1 = datExpr
+load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+gc()
+net = readRDS("../results/netWTage.LimmaBatch05.12.it.40.rds")
+Pres = preservationOneWay(network = net, expr.data.files = list(datExpr, datExpr1), tissues = c("WT", "Sierksma"), permutations=200)
+write.csv(Pres[[1]], file = "../results/ACWTlimma05AllvsStillingZvalues.csv")
+write.csv(Pres[[2]], file = "../results/ACWTlimma05AllvsStillingPvalues.csv")
+
+##Zhao data
+load("../ProcessedData/StillingPreProcessed.rds")
+datExpr1 = datExpr
+load("../ProcessedData/ZhaoPreProcessed.rds")
+gc()
+net = readRDS("../results/netWTage.LimmaBatch05.12.it.40.rds")
+Pres = preservationOneWay(network = net, expr.data.files = list(datExpr, datExpr1), tissues = c("WT", "Sierksma"), permutations=200)
+write.csv(Pres[[1]], file = "../results/ACWTlimma05AllvsZhaoZvalues.csv")
+write.csv(Pres[[2]], file = "../results/ACWTlimma05AllvsZhaoPvalues.csv")
+```
+
+We can also assess the expression of modules of interest in comparable datasets (we wont use Sieksma as it only goes to 12 months of age)
+
+```{r}
+net.name ="netWTage.LimmaBatch05.12.it.40.rds"
+Beta = 12
+MOIs = c("magenta", "plum1")
+
+for(Network in MOIs){
+  load("../ProcessedData/WTage.LimmaBatch05.DataInput.rds")
+  tissue = paste("../results/", net.name, sep = "")
+  Module <- mms_TOM(datExpr, Network, tissue, Beta)
+  Scores = getNetworkEigengenes(tissue,which.one="new")
+   Scores$x <- rownames(Scores)
+   colnames(datTraits)[2] = "Age"
+   datTraits$x = rownames(datTraits)
+  Scores <- merge(Scores, datTraits[,c(2,9)], by = "x")
+  Scores$Dataset = rep("AC")
+    net = readRDS(tissue)
+    load("../ProcessedData/StillingPreProcessed.rds")
+    Assignments = as.data.frame(net$moduleColors)
+    Assignments$Genes = rownames(Assignments)
+    mset = Assignments[,c(2,1)]
+    mset[mset$Genes %in% Module[[1]]$ensgene,]$`net$moduleColors` = Network
+    mset = mset[mset$Genes %in% colnames(datExpr),]
+    datExpr = datExpr[,colnames(datExpr) %in% mset$Genes]
+    genes = colnames(datExpr)
+    MEs = moduleEigengenes(datExpr, 
+                   mset$`net$moduleColors`, 
+                   impute = TRUE, 
+                   nPC = 1, 
+                   align = "along average", 
+                   excludeGrey = FALSE, 
+                   grey = if (is.numeric(colors)) 0 else "grey",
+                   subHubs = TRUE,
+                   trapErrors = TRUE, 
+                   returnValidOnly = TRUE, 
+                   softPower = 6,
+                   scale = TRUE,
+                   verbose = 0, indent = 0)
+    MEs = MEs[[1]]
+    datTraits$x = rownames(datTraits)
+    MEs$x <- rownames(MEs)
+    MEs$Dataset = rep("Stilling")
+    colnames(datTraits)[2] = "Age"
+    datTraits$Age = as.numeric(datTraits$Age)
+    datTraits$Age = round(as.numeric(datTraits$Age) * 4.34524) #Convert to weeks
+    datTraits$x = rownames(datTraits)
+    MEs <- merge(MEs, datTraits[,c(2,4)], by = "x")
+    Scores = rbind(Scores, MEs)
+  
+  load("../ProcessedData/ZhaoPreProcessed.rds")
+  
+    mset = mset[mset$Genes %in% colnames(datExpr),]
+    datExpr = datExpr[,colnames(datExpr) %in% mset$Genes]
+    genes = colnames(datExpr)
+    MEs = moduleEigengenes(datExpr, 
+                   mset$`net$moduleColors`, 
+                   impute = TRUE, 
+                   nPC = 1, 
+                   align = "along average", 
+                   excludeGrey = FALSE, 
+                   grey = if (is.numeric(colors)) 0 else "grey",
+                   subHubs = TRUE,
+                   trapErrors = TRUE, 
+                   returnValidOnly = TRUE, 
+                   softPower = 6,
+                   scale = TRUE,
+                   verbose = 0, indent = 0)
+    MEs = MEs[[1]]
+    datTraits$x = rownames(datTraits)
+    MEs$x <- rownames(MEs)
+    MEs$Dataset = rep("Zhao")
+    colnames(datTraits)[4] = "Age"
+    datTraits$Age = as.numeric(datTraits$Age)
+    datTraits$Age = round(as.numeric(datTraits$Age) * 4.34524) #Convert to weeks
+    datTraits$x = rownames(datTraits)
+    MEs <- merge(MEs, datTraits[,c(4,9)], by = "x")
+    Scores = rbind(Scores, MEs)
+    Scores$MEscore <- as.numeric(Scores[,colnames(Scores)== paste0("ME",Network)])
+    Scores$MEscore = Scores$MEscore
+    Scores$MEscore <- as.numeric(Scores$MEscore)
+    Scores$WeeksofAge = as.factor(Scores$Age)
+    
+    #Convert Zhao and Stilling Ages to weeks
+    Scores$Age = as.numeric(Scores$Age)
+   
+    Scores_sum <- data_summary(Scores, varname="MEscore", 
+                             groupnames=c("WeeksofAge", "Dataset"))
+    
+    print(Network)
+    print(ggplot(Scores_sum, aes(x=WeeksofAge, y=MEscore, group= Dataset,color=Dataset)) + ylab(paste0(Network, " Expression by Age")) +
+      geom_errorbar(aes(ymin=MEscore-sd, ymax=MEscore+sd), width=.1) +
+      geom_line(aes(color = Dataset, linetype = Dataset)) + geom_point()+ theme_minimal()  +
+      scale_color_brewer(palette="Set1"))
+    write.csv(Scores[,colnames(Scores) %in% c("MEscore", "Dataset", "Age")], file = paste0("../results/MouseACWT_",Network, "_MEinAgeingWTdatasets.csv"))
+    
+  for(Mod in split(Scores, f = Scores$Dataset)){
+    Mod = as.data.frame(Mod)
+    print(unique(Mod$Dataset))
+    print(cor.test(as.numeric(Mod$MEscore), as.numeric(Mod$Age)))
+  }
+  
+}
+```
+
+```{r}
+sessionInfo()
+```

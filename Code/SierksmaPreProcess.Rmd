@@ -1,0 +1,98 @@
+---
+title: "Sierksma Bulk"
+output: html_document
+---
+
+```{r setup}
+#Load Packages 
+
+library(limma)
+library(swamp)
+library(readr)
+library(WGCNA)
+library(CoExpNets)
+library(tibble)
+library(CoExpNets)
+library(biomaRt)
+library(dplyr)
+library(outliers)
+library(flashClust)
+library(tibble)
+library(outliers)
+library(flashClust)
+source("CoExp_Fun.R")
+```
+
+Load the data
+
+```{r}
+Sys.setenv(VROOM_CONNECTION_SIZE=500072)
+datExpr0 <- read_delim("../RawData/GSE110741_nm.mRNA.mmu.txt.gz", 
+    "\t", escape_double = FALSE, trim_ws = TRUE)
+datExpr0 = column_to_rownames(datExpr0, var = "...1")
+
+#Get Metadata from GEO and recode some columns
+datTraits = GEOquery::getGEO("GSE110741")
+datTraits = datTraits[["GSE110741_series_matrix.txt.gz"]]
+datTraits = datTraits@phenoData
+datTraits = datTraits@data
+rownames(datTraits) = NULL
+datTraits = column_to_rownames(datTraits, var = "title")
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ]);
+datTraits = datTraits[,c(43:45)]
+datTraits$genotype = as.numeric(gsub("Wildtype", 0, gsub("Transgenic", 1, datTraits$`genotype:ch1`)))
+datTraits$ageWT = rep(NA)
+datTraits[grep("WT_Y", rownames(datTraits)),]$ageWT = 4
+datTraits[grep("WT_O", rownames(datTraits)),]$ageWT = 12
+datTraits$ageTG = rep(NA)
+datTraits[grep("TG_Y", rownames(datTraits)),]$ageTG = 4
+datTraits[grep("TG_O", rownames(datTraits)),]$ageTG = 12
+datTraits[datTraits$genotype == 1,]$ageTG = datTraits[datTraits$genotype == 1,]$`age (month):ch1`
+datTraits[datTraits$genotype == 1,]$ageTG = as.numeric(datTraits[datTraits$genotype == 1,]$`age (month):ch1`)
+datTraits$Group = rep(NA)
+datTraits[grep("WT_Y", rownames(datTraits)),]$Group = 1
+datTraits[grep("WT_O", rownames(datTraits)),]$Group = 2
+datTraits[grep("TG_Y", rownames(datTraits)),]$Group = 3
+datTraits[grep("TG_O", rownames(datTraits)),]$Group = 4
+
+#Remove non WT samples
+datExpr0 = datExpr0[,datTraits$genotype == 0]
+femaleSamples = colnames(datExpr0);
+traitRows = match(femaleSamples, rownames(datTraits));
+datTraits <- as.data.frame(datTraits[traitRows, ]);
+```
+
+
+Then we filter and process data
+
+```{r}
+#Take exponential of logged counts before variation filtration
+datExpr0 = expm1(datExpr0)
+
+datExpr = CoExpPrepare(datExpr0, datTraits, 0.05, 0.5)
+```
+
+```{r}
+#Detect outliers
+outlist = NULL
+#Traspose data frame and get a distance matrix between pairs of samples
+sampdist = as.matrix(dist(datExpr))
+result = grubbs.test(apply(sampdist,1,sum))
+#Is the test significant at 95% confidence level?
+if(result$p.value < 0.05){
+  cat("We should drop out",names(result$p.value),"\n")
+  plot(flashClust(dist(datExpr), method = "average"),cex=0.5,
+       main=paste0("Detected outlier ",names(result$p.value)," in Samples"))
+}else
+  cat("No plausible outlier detected\n")
+```
+
+```{r}
+#Remove outliers
+datExpr <- datExpr[!rownames(datExpr) == "TAU_WT_Y_03",]
+datTraits <- as.data.frame(datTraits[match(rownames(datExpr), rownames(datTraits)), ])
+
+save(datExpr, datTraits, file = "../ProcessedData/Sierksma.PreservationInput.rds")
+```
