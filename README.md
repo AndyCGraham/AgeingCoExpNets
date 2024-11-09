@@ -8,6 +8,6 @@ Bulk mouse co-expression analysis: MouseAC_CoExpNets.Rmd.
 
 Single-cell mouse co-expression analysis: Single-Cell_CoExpNets.Rmd.
 
-To run all files in the right order: main.R.
+To run all files (including processing of other datasets used for preservation analysis and validation of changes with age) in the right order: main.R.
 
 
